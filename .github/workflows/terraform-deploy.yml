@@ -43,10 +43,11 @@ on:
 env:
   TF_VERSION: '1.5.7'
   TF_WORKING_DIR: './infrastructure/terraform'
-  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
 
 jobs:
   terraform-validate:
@@ -102,14 +103,21 @@ jobs:
         terraform_version: ${{ env.TF_VERSION }}
         terraform_wrapper: false
         
-    - name: 🔐 Azure Login
+    - name: 🔐 Azure Login (OIDC)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         
     - name: 🏗️ Terraform Init
       run: terraform init
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       
     - name: 📋 Terraform Plan
       id: plan
@@ -120,6 +128,11 @@ jobs:
           -out="tfplan-${ENV}" \
           -no-color
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       continue-on-error: true
       
     - name: 📤 Upload Plan Artifact
@@ -187,14 +200,21 @@ jobs:
         terraform_version: ${{ env.TF_VERSION }}
         terraform_wrapper: false
         
-    - name: 🔐 Azure Login
+    - name: 🔐 Azure Login (OIDC)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         
     - name: 🏗️ Terraform Init
       run: terraform init
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       
     - name: 📥 Download Plan Artifact
       if: github.event.inputs.action == 'apply'
@@ -216,6 +236,11 @@ jobs:
             -no-color
         fi
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       
     - name: 📊 Extract Terraform Outputs
       id: outputs
@@ -225,6 +250,11 @@ jobs:
         echo "cosmos_db_name=$(terraform output -raw cosmos_db_account_name)" >> $GITHUB_OUTPUT
         echo "vnet_name=$(terraform output -raw vnet_name)" >> $GITHUB_OUTPUT
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       continue-on-error: true
 
   deploy-agents:
@@ -238,10 +268,12 @@ jobs:
     - name: 📥 Checkout Repository
       uses: actions/checkout@v4
       
-    - name: 🔐 Azure Login
+    - name: 🔐 Azure Login (OIDC)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         
     - name: 🐍 Setup Python
       uses: actions/setup-python@v4
@@ -275,7 +307,6 @@ jobs:
             "COSMOS_DB_ENDPOINT=$(az cosmosdb show --resource-group ${{ needs.terraform-apply.outputs.resource-group-name }} --name ${{ needs.terraform-apply.outputs.cosmos-db-name }} --query documentEndpoint -o tsv)" \
             "COSMOS_DB_KEY=$(az cosmosdb keys list --resource-group ${{ needs.terraform-apply.outputs.resource-group-name }} --name ${{ needs.terraform-apply.outputs.cosmos-db-name }} --query primaryMasterKey -o tsv)" \
             "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" \
-            "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" \
             "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}"
 
   terraform-destroy:
@@ -294,14 +325,21 @@ jobs:
       with:
         terraform_version: ${{ env.TF_VERSION }}
         
-    - name: 🔐 Azure Login
+    - name: 🔐 Azure Login (OIDC)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         
     - name: 🏗️ Terraform Init
       run: terraform init
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       
     - name: 💥 Terraform Destroy
       run: |
@@ -311,6 +349,11 @@ jobs:
           -auto-approve \
           -no-color
       working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: true
       if: github.event.inputs.auto_approve == 'true'
 
   post-deployment:
@@ -323,10 +366,12 @@ jobs:
     - name: 📥 Checkout Repository
       uses: actions/checkout@v4
       
-    - name: 🔐 Azure Login
+    - name: 🔐 Azure Login (OIDC)
       uses: azure/login@v1
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         
     - name: 🧪 Run Health Checks
       run: |
@@ -381,7 +426,7 @@ jobs:
         5. 📊 Monitor application performance
         
         ---
-        *Generated by GitHub Actions*
+        *Generated by GitHub Actions with OIDC Authentication*
         EOF
         
     - name: 📤 Upload Deployment Report
