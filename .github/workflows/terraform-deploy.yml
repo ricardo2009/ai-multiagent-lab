@@ -1,0 +1,393 @@
+name: 🚀 Terraform Infrastructure Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - production
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+        - plan
+        - apply
+        - destroy
+      auto_approve:
+        description: 'Auto approve apply/destroy'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/terraform-deploy.yml'
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'infrastructure/terraform/**'
+
+env:
+  TF_VERSION: '1.5.7'
+  TF_WORKING_DIR: './infrastructure/terraform'
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+jobs:
+  terraform-validate:
+    name: 🔍 Terraform Validate
+    runs-on: ubuntu-latest
+    
+    outputs:
+      tf-fmt-check: ${{ steps.fmt.outputs.exitcode }}
+      tf-validate: ${{ steps.validate.outputs.stdout }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+        
+    - name: 📝 Terraform Format Check
+      id: fmt
+      run: terraform fmt -check -recursive
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      continue-on-error: true
+      
+    - name: 🏗️ Terraform Init
+      run: terraform init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      
+    - name: ✅ Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+      working-directory: ${{ env.TF_WORKING_DIR }}
+
+  terraform-plan:
+    name: 📋 Terraform Plan
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    outputs:
+      tf-plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      tf-plan-output: ${{ steps.plan.outputs.stdout }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+        terraform_wrapper: false
+        
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🏗️ Terraform Init
+      run: terraform init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      
+    - name: 📋 Terraform Plan
+      id: plan
+      run: |
+        ENV="${{ github.event.inputs.environment || 'dev' }}"
+        terraform plan \
+          -var-file="environments/${ENV}/terraform.tfvars" \
+          -out="tfplan-${ENV}" \
+          -no-color
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      continue-on-error: true
+      
+    - name: 📤 Upload Plan Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan-${{ github.event.inputs.environment || 'dev' }}
+        path: ${{ env.TF_WORKING_DIR }}/tfplan-*
+        retention-days: 5
+        
+    - name: 💬 Comment PR with Plan
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const output = `
+          ## 📋 Terraform Plan Results
+          
+          **Environment**: \`${{ github.event.inputs.environment || 'dev' }}\`
+          **Format Check**: \`${{ needs.terraform-validate.outputs.tf-fmt-check == '0' && '✅ Passed' || '❌ Failed' }}\`
+          **Validation**: \`${{ needs.terraform-validate.outputs.tf-validate && '✅ Passed' || '❌ Failed' }}\`
+          **Plan**: \`${{ steps.plan.outputs.exitcode == '0' && '✅ Success' || steps.plan.outputs.exitcode == '2' && '⚠️ Changes Detected' || '❌ Failed' }}\`
+          
+          <details>
+          <summary>📋 Show Plan Output</summary>
+          
+          \`\`\`terraform
+          ${{ steps.plan.outputs.stdout }}
+          \`\`\`
+          
+          </details>
+          
+          *Workflow run: [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          });
+
+  terraform-apply:
+    name: 🚀 Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [terraform-validate, terraform-plan]
+    if: |
+      (github.event.inputs.action == 'apply' && 
+       (github.event.inputs.auto_approve == 'true' || github.event_name == 'workflow_dispatch')) ||
+      (github.ref == 'refs/heads/main' && github.event_name == 'push')
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    outputs:
+      tf-apply-output: ${{ steps.apply.outputs.stdout }}
+      resource-group-name: ${{ steps.outputs.outputs.resource_group_name }}
+      function-app-name: ${{ steps.outputs.outputs.function_app_name }}
+      cosmos-db-name: ${{ steps.outputs.outputs.cosmos_db_name }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+        terraform_wrapper: false
+        
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🏗️ Terraform Init
+      run: terraform init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      
+    - name: 📥 Download Plan Artifact
+      if: github.event.inputs.action == 'apply'
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-plan-${{ github.event.inputs.environment || 'dev' }}
+        path: ${{ env.TF_WORKING_DIR }}
+        
+    - name: 🚀 Terraform Apply
+      id: apply
+      run: |
+        ENV="${{ github.event.inputs.environment || 'dev' }}"
+        if [ -f "tfplan-${ENV}" ]; then
+          terraform apply -no-color "tfplan-${ENV}"
+        else
+          terraform apply \
+            -var-file="environments/${ENV}/terraform.tfvars" \
+            -auto-approve \
+            -no-color
+        fi
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      
+    - name: 📊 Extract Terraform Outputs
+      id: outputs
+      run: |
+        echo "resource_group_name=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+        echo "function_app_name=$(terraform output -raw function_app_name)" >> $GITHUB_OUTPUT
+        echo "cosmos_db_name=$(terraform output -raw cosmos_db_account_name)" >> $GITHUB_OUTPUT
+        echo "vnet_name=$(terraform output -raw vnet_name)" >> $GITHUB_OUTPUT
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      continue-on-error: true
+
+  deploy-agents:
+    name: 🤖 Deploy AI Agents
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    if: success()
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r src/agents/requirements.txt
+      
+    - name: 📦 Package Function App
+      run: |
+        cd src/functions
+        zip -r function-app.zip . -x "*.pyc" "__pycache__/*" "*.git*"
+        
+    - name: 🚀 Deploy to Azure Functions
+      run: |
+        az functionapp deployment source config-zip \
+          --resource-group "${{ needs.terraform-apply.outputs.resource-group-name }}" \
+          --name "${{ needs.terraform-apply.outputs.function-app-name }}" \
+          --src src/functions/function-app.zip
+          
+    - name: ⚙️ Configure Function App Settings
+      run: |
+        # Set environment variables for the Function App
+        az functionapp config appsettings set \
+          --resource-group "${{ needs.terraform-apply.outputs.resource-group-name }}" \
+          --name "${{ needs.terraform-apply.outputs.function-app-name }}" \
+          --settings \
+            "COSMOS_DB_ENDPOINT=$(az cosmosdb show --resource-group ${{ needs.terraform-apply.outputs.resource-group-name }} --name ${{ needs.terraform-apply.outputs.cosmos-db-name }} --query documentEndpoint -o tsv)" \
+            "COSMOS_DB_KEY=$(az cosmosdb keys list --resource-group ${{ needs.terraform-apply.outputs.resource-group-name }} --name ${{ needs.terraform-apply.outputs.cosmos-db-name }} --query primaryMasterKey -o tsv)" \
+            "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" \
+            "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" \
+            "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}"
+
+  terraform-destroy:
+    name: 💥 Terraform Destroy
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.event.inputs.action == 'destroy'
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+        
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🏗️ Terraform Init
+      run: terraform init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      
+    - name: 💥 Terraform Destroy
+      run: |
+        ENV="${{ github.event.inputs.environment || 'dev' }}"
+        terraform destroy \
+          -var-file="environments/${ENV}/terraform.tfvars" \
+          -auto-approve \
+          -no-color
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      if: github.event.inputs.auto_approve == 'true'
+
+  post-deployment:
+    name: 📊 Post-Deployment Tasks
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, deploy-agents]
+    if: success()
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🧪 Run Health Checks
+      run: |
+        echo "🔍 Running health checks..."
+        
+        # Check Function App status
+        FUNCTION_STATUS=$(az functionapp show \
+          --resource-group "${{ needs.terraform-apply.outputs.resource-group-name }}" \
+          --name "${{ needs.terraform-apply.outputs.function-app-name }}" \
+          --query state -o tsv)
+        
+        echo "Function App Status: $FUNCTION_STATUS"
+        
+        # Check Cosmos DB status
+        COSMOS_STATUS=$(az cosmosdb show \
+          --resource-group "${{ needs.terraform-apply.outputs.resource-group-name }}" \
+          --name "${{ needs.terraform-apply.outputs.cosmos-db-name }}" \
+          --query provisioningState -o tsv)
+        
+        echo "Cosmos DB Status: $COSMOS_STATUS"
+        
+    - name: 📊 Generate Deployment Report
+      run: |
+        cat > deployment-report.md << EOF
+        # 🎉 Deployment Report
+        
+        **Environment**: ${{ github.event.inputs.environment || 'dev' }}
+        **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        **Workflow Run**: [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        
+        ## 📋 Deployed Resources
+        
+        | Resource Type | Name | Status |
+        |---------------|------|--------|
+        | Resource Group | ${{ needs.terraform-apply.outputs.resource-group-name }} | ✅ Created |
+        | Function App | ${{ needs.terraform-apply.outputs.function-app-name }} | ✅ Deployed |
+        | Cosmos DB | ${{ needs.terraform-apply.outputs.cosmos-db-name }} | ✅ Provisioned |
+        | Virtual Network | ${{ needs.terraform-apply.outputs.vnet-name }} | ✅ Configured |
+        
+        ## 🔗 Quick Links
+        
+        - [Azure Portal - Resource Group](https://portal.azure.com/#@${{ secrets.AZURE_TENANT_ID }}/resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ needs.terraform-apply.outputs.resource-group-name }})
+        - [Function App](https://portal.azure.com/#@${{ secrets.AZURE_TENANT_ID }}/resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ needs.terraform-apply.outputs.resource-group-name }}/providers/Microsoft.Web/sites/${{ needs.terraform-apply.outputs.function-app-name }})
+        - [Cosmos DB](https://portal.azure.com/#@${{ secrets.AZURE_TENANT_ID }}/resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ needs.terraform-apply.outputs.resource-group-name }}/providers/Microsoft.DocumentDB/databaseAccounts/${{ needs.terraform-apply.outputs.cosmos-db-name }})
+        
+        ## 🎯 Next Steps
+        
+        1. ✅ Infrastructure deployed successfully
+        2. ✅ AI Agents deployed to Function App
+        3. 🔄 Configure Copilot Studio integration
+        4. 🧪 Run integration tests
+        5. 📊 Monitor application performance
+        
+        ---
+        *Generated by GitHub Actions*
+        EOF
+        
+    - name: 📤 Upload Deployment Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-report-${{ github.event.inputs.environment || 'dev' }}-${{ github.run_number }}
+        path: deployment-report.md
+        retention-days: 30
+

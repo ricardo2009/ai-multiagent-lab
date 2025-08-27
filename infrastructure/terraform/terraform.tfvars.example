@@ -1,0 +1,31 @@
+# Example Terraform Variables File
+# Copy this file to terraform.tfvars and customize the values
+
+# Environment Configuration
+environment = "dev"
+location    = "East US"
+
+# Networking Configuration
+vnet_address_space = ["10.0.0.0/16"]
+
+# Resource Configuration
+aks_node_count   = 2
+aks_node_vm_size = "Standard_D2s_v3"
+
+cosmos_db_consistency_level = "Session"
+functions_plan_sku         = "Y1"
+ai_foundry_sku            = "Basic"
+
+# Monitoring Configuration
+enable_monitoring        = true
+enable_private_endpoints = true
+log_retention_days      = 30
+
+# Tags
+tags = {
+  Owner       = "AI-Multiagent-Lab"
+  CostCenter  = "Engineering"
+  Environment = "dev"
+  Project     = "AI-Multiagent-Lab"
+}
+
