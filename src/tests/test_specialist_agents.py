@@ -1,6 +1,10 @@
-from src.agents.specialist_agents.analysis_agent import analyze
-from src.agents.specialist_agents.generation_agent import generate
-from src.agents.specialist_agents.validation_agent import validate
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from agents.specialist_agents.analysis_agent import analyze
+from agents.specialist_agents.generation_agent import generate
+from agents.specialist_agents.validation_agent import validate
 
 def test_analysis_agent():
     result = analyze("Test data")
