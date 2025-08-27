@@ -1,0 +1,181 @@
+// ========================================
+// CONSULTAS KQL PARA MONITORAMENTO DE SEGURANÇA
+// ========================================
+
+// 1. DETECÇÃO DE TENTATIVAS DE ACESSO NÃO AUTORIZADO
+// Monitora tentativas de acesso com credenciais inválidas
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "authentication_failed" or Message contains "unauthorized_access"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    SourceIP = tostring(Properties.source_ip),
+    UserAgent = tostring(Properties.user_agent),
+    AttemptedResource = tostring(Properties.attempted_resource)
+| summarize 
+    FailedAttempts = count(),
+    UniqueIPs = dcount(SourceIP),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by SourceIP, AgentId
+| where FailedAttempts >= 5 // 5 ou mais tentativas falhadas
+| order by FailedAttempts desc
+
+// 2. ANÁLISE DE ANOMALIAS DE COMPORTAMENTO
+// Detecta comportamentos anômalos nos agentes
+AppTraces
+| where TimeGenerated > ago(24h)
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    RequestCount = count(),
+    UniqueOperations = dcount(tostring(Properties.operation_type)),
+    AvgRequestsPerHour = count() / 24.0
+    by AgentId, bin(TimeGenerated, 1h)
+| extend PreviousAvgRequests = prev(AvgRequestsPerHour, 1)
+| where AvgRequestsPerHour > PreviousAvgRequests * 3 // 300% de aumento
+| project TimeGenerated, AgentId, AvgRequestsPerHour, PreviousAvgRequests, 
+          AnomalyFactor = round(AvgRequestsPerHour / PreviousAvgRequests, 2)
+
+// 3. MONITORAMENTO DE ACESSO A DADOS SENSÍVEIS
+// Rastreia acesso a dados classificados como sensíveis
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message contains "sensitive_data_access"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    DataType = tostring(Properties.data_type),
+    AccessType = tostring(Properties.access_type),
+    DataClassification = tostring(Properties.data_classification)
+| summarize 
+    AccessCount = count(),
+    UniqueDataTypes = dcount(DataType),
+    AccessTypes = make_set(AccessType)
+    by AgentId, DataClassification, bin(TimeGenerated, 1h)
+| where DataClassification in ("Confidential", "Restricted")
+| order by AccessCount desc
+
+// 4. DETECÇÃO DE INJEÇÃO DE CÓDIGO
+// Monitora tentativas de injeção de código malicioso
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "input_validation" or Message contains "code_injection"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    InputData = tostring(Properties.input_data),
+    ValidationResult = tostring(Properties.validation_result),
+    ThreatLevel = tostring(Properties.threat_level)
+| where ValidationResult == "FAILED" or ThreatLevel in ("HIGH", "CRITICAL")
+| summarize 
+    ThreatAttempts = count(),
+    UniqueThreatPatterns = dcount(InputData),
+    HighestThreatLevel = arg_max(ThreatLevel, TimeGenerated)
+    by AgentId, bin(TimeGenerated, 10m)
+| order by ThreatAttempts desc
+
+// 5. AUDITORIA DE ALTERAÇÕES DE CONFIGURAÇÃO
+// Rastreia mudanças nas configurações dos agentes
+AppTraces
+| where TimeGenerated > ago(7d)
+| where Message contains "configuration_changed"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    ConfigParameter = tostring(Properties.config_parameter),
+    OldValue = tostring(Properties.old_value),
+    NewValue = tostring(Properties.new_value),
+    ChangedBy = tostring(Properties.changed_by)
+| project TimeGenerated, AgentId, ConfigParameter, OldValue, NewValue, ChangedBy
+| order by TimeGenerated desc
+
+// 6. MONITORAMENTO DE COMUNICAÇÃO CRIPTOGRAFADA
+// Verifica se toda comunicação entre agentes está criptografada
+AppDependencies
+| where TimeGenerated > ago(1h)
+| where Type == "HTTP"
+| extend 
+    IsEncrypted = case(Target startswith "https://", true, false),
+    AgentId = tostring(Properties.agent_id)
+| summarize 
+    TotalCalls = count(),
+    EncryptedCalls = countif(IsEncrypted == true),
+    UnencryptedCalls = countif(IsEncrypted == false),
+    EncryptionRate = round(countif(IsEncrypted == true) * 100.0 / count(), 2)
+    by AgentId
+| where UnencryptedCalls > 0 // Alertar sobre comunicação não criptografada
+| order by UnencryptedCalls desc
+
+// 7. ANÁLISE DE TOKENS E CERTIFICADOS EXPIRADOS
+// Monitora tokens e certificados próximos do vencimento
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "token_validation" or Message contains "certificate_validation"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TokenType = tostring(Properties.token_type),
+    ExpirationDate = todatetime(Properties.expiration_date),
+    DaysUntilExpiration = datetime_diff('day', ExpirationDate, now())
+| where DaysUntilExpiration <= 30 // Tokens/certificados que expiram em 30 dias
+| summarize 
+    ExpiringCredentials = count(),
+    NearestExpiration = min(ExpirationDate)
+    by AgentId, TokenType
+| order by NearestExpiration asc
+
+// 8. DETECÇÃO DE ATIVIDADE SUSPEITA FORA DO HORÁRIO
+// Identifica atividade dos agentes fora do horário comercial
+AppRequests
+| where TimeGenerated > ago(7d)
+| where Name contains "agent"
+| extend 
+    AgentName = extract(@"agent-(\w+)", 1, Name),
+    Hour = hourofday(TimeGenerated),
+    IsBusinessHour = case(Hour >= 8 and Hour <= 18, true, false)
+| summarize 
+    TotalRequests = count(),
+    BusinessHourRequests = countif(IsBusinessHour == true),
+    AfterHourRequests = countif(IsBusinessHour == false),
+    AfterHourPercentage = round(countif(IsBusinessHour == false) * 100.0 / count(), 2)
+    by AgentName, bin(TimeGenerated, 1d)
+| where AfterHourPercentage > 20 // Mais de 20% da atividade fora do horário
+| order by AfterHourPercentage desc
+
+// 9. MONITORAMENTO DE PRIVILÉGIOS ELEVADOS
+// Rastreia uso de privilégios administrativos
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message contains "elevated_privilege" or Message contains "admin_operation"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    Operation = tostring(Properties.operation),
+    PrivilegeLevel = tostring(Properties.privilege_level),
+    Justification = tostring(Properties.justification)
+| summarize 
+    ElevatedOperations = count(),
+    UniqueOperations = dcount(Operation),
+    OperationTypes = make_set(Operation)
+    by AgentId, PrivilegeLevel
+| order by ElevatedOperations desc
+
+// 10. ANÁLISE DE CORRELAÇÃO DE EVENTOS DE SEGURANÇA
+// Correlaciona diferentes eventos de segurança para detectar ataques coordenados
+let SecurityEvents = AppTraces
+| where TimeGenerated > ago(2h)
+| where Message has_any ("authentication_failed", "unauthorized_access", "code_injection", "suspicious_activity")
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    SourceIP = tostring(Properties.source_ip),
+    EventType = case(
+        Message contains "authentication_failed", "AuthFailure",
+        Message contains "unauthorized_access", "UnauthorizedAccess",
+        Message contains "code_injection", "CodeInjection",
+        "SuspiciousActivity"
+    );
+SecurityEvents
+| summarize 
+    EventCount = count(),
+    EventTypes = make_set(EventType),
+    AffectedAgents = dcount(AgentId),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated)
+    by SourceIP, bin(TimeGenerated, 10m)
+| where EventCount >= 3 and AffectedAgents >= 2 // Múltiplos eventos em múltiplos agentes
+| order by EventCount desc
+

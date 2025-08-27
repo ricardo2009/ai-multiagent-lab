@@ -1,0 +1,148 @@
+graph TB
+    %% User Interface Layer
+    subgraph "Interface do Usuário"
+        UI[Web Interface]
+        API[REST API Gateway]
+        CLI[CLI Tools]
+    end
+
+    %% Orchestration Layer
+    subgraph "Camada de Orquestração"
+        COORD[Agente Coordenador]
+        COPILOT[Microsoft Copilot Studio]
+        FOUNDRY[Azure AI Foundry]
+    end
+
+    %% Specialized Agents
+    subgraph "Agentes Especializados"
+        AGENT1[Agente de Análise]
+        AGENT2[Agente de Geração]
+        AGENT3[Agente de Validação]
+        AGENT4[Agente de Integração]
+    end
+
+    %% Compute Layer
+    subgraph "Camada de Computação"
+        AKS[Azure Kubernetes Service]
+        FUNC[Azure Functions]
+        ACI[Azure Container Instances]
+    end
+
+    %% Data Layer
+    subgraph "Camada de Dados"
+        COSMOS[Azure Cosmos DB]
+        BLOB[Azure Blob Storage]
+        SEARCH[Azure Cognitive Search]
+        REDIS[Azure Cache for Redis]
+    end
+
+    %% AI Services
+    subgraph "Serviços de IA"
+        OPENAI[Azure OpenAI Service]
+        COGNITIVE[Azure Cognitive Services]
+        ML[Azure Machine Learning]
+    end
+
+    %% Security & Identity
+    subgraph "Segurança e Identidade"
+        ENTRA[Microsoft Entra ID]
+        KEYVAULT[Azure Key Vault]
+        RBAC[Azure RBAC]
+    end
+
+    %% Monitoring & Observability
+    subgraph "Observabilidade"
+        MONITOR[Azure Monitor]
+        INSIGHTS[Application Insights]
+        LOGS[Log Analytics]
+        ALERTS[Azure Alerts]
+    end
+
+    %% Automation & DevOps
+    subgraph "Automação e DevOps"
+        GITHUB[GitHub Actions]
+        BICEP[Bicep Templates]
+        TERRAFORM[Terraform]
+        DEVOPS[Azure DevOps]
+    end
+
+    %% Networking
+    subgraph "Rede"
+        VNET[Virtual Network]
+        NSG[Network Security Groups]
+        LB[Load Balancer]
+        GATEWAY[Application Gateway]
+    end
+
+    %% Connections
+    UI --> API
+    CLI --> API
+    API --> COORD
+    COORD --> COPILOT
+    COORD --> FOUNDRY
+    
+    COORD --> AGENT1
+    COORD --> AGENT2
+    COORD --> AGENT3
+    COORD --> AGENT4
+    
+    AGENT1 --> AKS
+    AGENT2 --> FUNC
+    AGENT3 --> ACI
+    AGENT4 --> AKS
+    
+    AKS --> COSMOS
+    FUNC --> BLOB
+    ACI --> SEARCH
+    
+    AGENT1 --> OPENAI
+    AGENT2 --> COGNITIVE
+    AGENT3 --> ML
+    
+    COORD --> REDIS
+    
+    %% Security connections
+    COORD -.-> ENTRA
+    AGENT1 -.-> KEYVAULT
+    AGENT2 -.-> RBAC
+    
+    %% Monitoring connections
+    AKS -.-> MONITOR
+    FUNC -.-> INSIGHTS
+    COSMOS -.-> LOGS
+    
+    %% Automation connections
+    GITHUB --> BICEP
+    GITHUB --> TERRAFORM
+    BICEP --> AKS
+    TERRAFORM --> COSMOS
+    
+    %% Network connections
+    API --> GATEWAY
+    GATEWAY --> LB
+    LB --> VNET
+    VNET --> NSG
+
+    %% Styling
+    classDef userLayer fill:#e1f5fe
+    classDef orchestrationLayer fill:#f3e5f5
+    classDef agentLayer fill:#e8f5e8
+    classDef computeLayer fill:#fff3e0
+    classDef dataLayer fill:#fce4ec
+    classDef aiLayer fill:#e0f2f1
+    classDef securityLayer fill:#ffebee
+    classDef monitoringLayer fill:#f1f8e9
+    classDef automationLayer fill:#e3f2fd
+    classDef networkLayer fill:#fafafa
+
+    class UI,API,CLI userLayer
+    class COORD,COPILOT,FOUNDRY orchestrationLayer
+    class AGENT1,AGENT2,AGENT3,AGENT4 agentLayer
+    class AKS,FUNC,ACI computeLayer
+    class COSMOS,BLOB,SEARCH,REDIS dataLayer
+    class OPENAI,COGNITIVE,ML aiLayer
+    class ENTRA,KEYVAULT,RBAC securityLayer
+    class MONITOR,INSIGHTS,LOGS,ALERTS monitoringLayer
+    class GITHUB,BICEP,TERRAFORM,DEVOPS automationLayer
+    class VNET,NSG,LB,GATEWAY networkLayer
+

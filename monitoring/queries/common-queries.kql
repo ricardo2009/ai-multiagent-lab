@@ -1,0 +1,113 @@
+// ========================================
+// CONSULTAS KQL COMUNS PARA INÍCIO RÁPIDO
+// ========================================
+
+// 1. VISÃO GERAL RÁPIDA DO SISTEMA
+// Status geral de todos os agentes nos últimos 15 minutos
+AppTraces
+| where TimeGenerated > ago(15m)
+| where Properties has "agent_id"
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    Events = count(),
+    Errors = countif(SeverityLevel >= 3),
+    LastActivity = max(TimeGenerated)
+    by AgentId
+| order by LastActivity desc
+
+// 2. LOGS DE UM AGENTE ESPECÍFICO
+// Visualizar todos os logs de um agente específico
+let TargetAgent = "coordinator-agent-123"; // Substitua pelo ID do agente
+AppTraces
+| where TimeGenerated > ago(1h)
+| where tostring(Properties.agent_id) == TargetAgent
+| project TimeGenerated, SeverityLevel, Message, Properties
+| order by TimeGenerated desc
+
+// 3. CONTAGEM DE ERROS POR AGENTE
+// Resumo de erros por agente para identificar problemas
+AppTraces
+| where TimeGenerated > ago(1h)
+| where SeverityLevel >= 3
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    ErrorCount = count(),
+    UniqueErrors = dcount(Message),
+    LastError = max(TimeGenerated)
+    by AgentId
+| order by ErrorCount desc
+
+// 4. LATÊNCIA MÉDIA DAS APIS
+// Performance das APIs dos agentes
+AppRequests
+| where TimeGenerated > ago(1h)
+| summarize 
+    AvgLatency = round(avg(DurationMs), 2),
+    RequestCount = count(),
+    SuccessRate = round(countif(Success == true) * 100.0 / count(), 2)
+    by Name
+| order by AvgLatency desc
+
+// 5. TOP 10 MENSAGENS DE ERRO
+// Erros mais frequentes no sistema
+AppExceptions
+| where TimeGenerated > ago(24h)
+| summarize ErrorCount = count() by Message
+| top 10 by ErrorCount desc
+
+// 6. ATIVIDADE POR HORA
+// Padrão de atividade do sistema ao longo do dia
+AppRequests
+| where TimeGenerated > ago(24h)
+| summarize RequestCount = count() by bin(TimeGenerated, 1h)
+| render timechart
+
+// 7. AGENTES MAIS ATIVOS
+// Ranking de agentes por volume de atividade
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Properties has "agent_id"
+| extend AgentId = tostring(Properties.agent_id)
+| summarize ActivityCount = count() by AgentId
+| order by ActivityCount desc
+
+// 8. VERIFICAÇÃO DE SAÚDE RÁPIDA
+// Status de saúde de todos os componentes
+union AppTraces, AppRequests, AppExceptions
+| where TimeGenerated > ago(5m)
+| summarize 
+    TotalEvents = count(),
+    Traces = countif($table == "AppTraces"),
+    Requests = countif($table == "AppRequests"),
+    Exceptions = countif($table == "AppExceptions")
+| extend HealthStatus = case(
+    Exceptions == 0 and Requests > 0, "Healthy",
+    Exceptions > 0 and Exceptions < Requests * 0.05, "Warning",
+    "Critical"
+)
+
+// 9. BUSCA POR PALAVRA-CHAVE
+// Buscar logs que contenham uma palavra-chave específica
+let SearchTerm = "timeout"; // Substitua pela palavra-chave desejada
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains SearchTerm or Properties contains SearchTerm
+| project TimeGenerated, SeverityLevel, Message, Properties
+| order by TimeGenerated desc
+
+// 10. RESUMO EXECUTIVO
+// Métricas principais para relatório executivo
+let TimeRange = ago(24h);
+union AppTraces, AppRequests, AppExceptions
+| where TimeGenerated > TimeRange
+| summarize 
+    TotalRequests = countif($table == "AppRequests"),
+    SuccessfulRequests = countif($table == "AppRequests" and todynamic(Properties).Success == true),
+    TotalErrors = countif($table == "AppExceptions"),
+    AvgResponseTime = round(avgif(todynamic(Properties).DurationMs, $table == "AppRequests"), 2),
+    SystemUptime = round(100.0 - (countif($table == "AppExceptions") * 100.0 / countif($table == "AppRequests")), 2)
+| extend 
+    SuccessRate = round(SuccessfulRequests * 100.0 / TotalRequests, 2),
+    ErrorRate = round(TotalErrors * 100.0 / TotalRequests, 2)
+
+

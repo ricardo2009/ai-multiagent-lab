@@ -1,0 +1,32 @@
+name: Deploy Agents to AKS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ai-multiagent-lab-rg
+          cluster-name: aks-ai-multiagent-lab
+
+      - name: Build and push Docker images
+        # TODO: Add steps to build and push Docker images to ACR
+        run: echo "Building and pushing images..."
+
+      - name: Deploy to AKS
+        # TODO: Add steps to deploy agents to AKS using kubectl or Helm
+        run: echo "Deploying to AKS..."
+
+

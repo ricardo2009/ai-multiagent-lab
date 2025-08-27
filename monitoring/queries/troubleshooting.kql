@@ -1,0 +1,129 @@
+// ========================================
+// CONSULTAS KQL PARA TROUBLESHOOTING
+// ========================================
+
+// 1. RASTREAMENTO DE TRANSAÇÃO COMPLETA
+// Rastreia uma transação específica através de todos os agentes
+let TransactionId = "txn-12345"; // Substitua pelo ID da transação
+AppTraces
+| where TimeGenerated > ago(1d)
+| where Properties has TransactionId
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TransactionId = tostring(Properties.transaction_id),
+    Step = tostring(Properties.step),
+    Duration = toint(Properties.duration_ms)
+| project TimeGenerated, AgentId, Step, Message, Duration, SeverityLevel
+| order by TimeGenerated asc
+
+// 2. ANÁLISE DE FALHAS EM CASCATA
+// Identifica quando falhas em um agente causam falhas em outros
+AppExceptions
+| where TimeGenerated > ago(2h)
+| extend AgentId = tostring(Properties.agent_id)
+| join kind=inner (
+    AppTraces
+    | where TimeGenerated > ago(2h)
+    | where SeverityLevel >= 3
+    | extend AgentId = tostring(Properties.agent_id)
+) on AgentId
+| summarize 
+    ExceptionCount = count(),
+    FirstException = min(TimeGenerated),
+    LastException = max(TimeGenerated),
+    AffectedAgents = dcount(AgentId)
+    by bin(TimeGenerated, 5m)
+| where AffectedAgents > 1
+
+// 3. DETECÇÃO DE DEADLOCKS E TIMEOUTS
+// Identifica possíveis deadlocks ou timeouts entre agentes
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "timeout" or Message contains "deadlock" or Message contains "waiting"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    WaitingFor = tostring(Properties.waiting_for_agent),
+    WaitDuration = toint(Properties.wait_duration_ms)
+| where WaitDuration > 30000 // Mais de 30 segundos
+| project TimeGenerated, AgentId, WaitingFor, WaitDuration, Message
+| order by WaitDuration desc
+
+// 4. ANÁLISE DE CONSUMO DE RECURSOS
+// Monitora uso excessivo de CPU e memória por agente
+AppMetrics
+| where TimeGenerated > ago(1h)
+| where Name in ("CPU Usage", "Memory Usage", "Thread Count")
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    AvgValue = avg(Value),
+    MaxValue = max(Value),
+    P95Value = percentile(Value, 95)
+    by Name, AgentId, bin(TimeGenerated, 5m)
+| where (Name == "CPU Usage" and P95Value > 80) or 
+        (Name == "Memory Usage" and P95Value > 85) or
+        (Name == "Thread Count" and P95Value > 100)
+
+// 5. ANÁLISE DE PADRÕES DE ERRO RECORRENTES
+// Identifica erros que se repetem com frequência
+AppExceptions
+| where TimeGenerated > ago(24h)
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    ErrorSignature = strcat(Type, "|", extract(@"^([^:]+)", 1, Message))
+| summarize 
+    Occurrences = count(),
+    FirstOccurrence = min(TimeGenerated),
+    LastOccurrence = max(TimeGenerated),
+    AffectedAgents = dcount(AgentId),
+    SampleMessage = any(Message)
+    by ErrorSignature
+| where Occurrences >= 5 // Erros que ocorreram 5+ vezes
+| order by Occurrences desc
+
+// 6. ANÁLISE DE COMUNICAÇÃO INTERROMPIDA
+// Detecta quando a comunicação entre agentes é interrompida
+let CommunicationWindow = 5m;
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "message_sent"
+| extend 
+    SourceAgent = tostring(Properties.source_agent),
+    TargetAgent = tostring(Properties.target_agent),
+    MessageId = tostring(Properties.message_id)
+| join kind=leftanti (
+    AppTraces
+    | where TimeGenerated > ago(1h)
+    | where Message contains "message_received"
+    | extend MessageId = tostring(Properties.message_id)
+) on MessageId
+| where TimeGenerated < ago(CommunicationWindow) // Mensagens não recebidas após 5 minutos
+| project TimeGenerated, SourceAgent, TargetAgent, MessageId, Message
+
+// 7. DETECÇÃO DE LOOPS INFINITOS
+// Identifica agentes que podem estar em loops infinitos
+AppTraces
+| where TimeGenerated > ago(30m)
+| where Message contains "processing" or Message contains "iteration"
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    ProcessingCount = count(),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated)
+    by AgentId, bin(TimeGenerated, 1m)
+| where ProcessingCount > 100 and TimeSpan < 1m // Mais de 100 processamentos em 1 minuto
+
+// 8. ANÁLISE DE DEGRADAÇÃO GRADUAL
+// Detecta degradação gradual de performance ao longo do tempo
+AppRequests
+| where TimeGenerated > ago(6h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize AvgLatency = avg(DurationMs) by AgentName, bin(TimeGenerated, 30m)
+| sort by AgentName, TimeGenerated asc
+| extend PrevLatency = prev(AvgLatency, 1)
+| extend LatencyTrend = case(
+    AvgLatency > PrevLatency * 1.2, "Degrading",
+    AvgLatency < PrevLatency * 0.8, "Improving", 
+    "Stable"
+)
+| where LatencyTrend == "Degrading"
+

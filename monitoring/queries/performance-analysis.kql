@@ -1,0 +1,131 @@
+// ========================================
+// CONSULTAS KQL PARA ANÁLISE DE PERFORMANCE
+// ========================================
+
+// 1. ANÁLISE DE PERFORMANCE POR HORÁRIO
+// Identifica padrões de performance ao longo do dia
+AppRequests
+| where TimeGenerated > ago(7d)
+| where Name contains "agent"
+| extend 
+    AgentName = extract(@"agent-(\w+)", 1, Name),
+    Hour = hourofday(TimeGenerated)
+| summarize 
+    AvgLatency = round(avg(DurationMs), 2),
+    RequestCount = count(),
+    ErrorRate = round(countif(Success == false) * 100.0 / count(), 2)
+    by AgentName, Hour
+| order by AgentName, Hour
+
+// 2. COMPARAÇÃO DE PERFORMANCE ENTRE VERSÕES
+// Compara performance antes e depois de deploys
+let DeployTime = datetime(2024-01-15T10:00:00); // Substitua pela data do deploy
+AppRequests
+| where TimeGenerated > DeployTime - 2h and TimeGenerated < DeployTime + 2h
+| where Name contains "agent"
+| extend 
+    AgentName = extract(@"agent-(\w+)", 1, Name),
+    Period = case(TimeGenerated < DeployTime, "Before", "After")
+| summarize 
+    AvgLatency = round(avg(DurationMs), 2),
+    P95Latency = round(percentile(DurationMs, 95), 2),
+    RequestCount = count(),
+    ErrorRate = round(countif(Success == false) * 100.0 / count(), 2)
+    by AgentName, Period
+| order by AgentName, Period
+
+// 3. ANÁLISE DE GARGALOS DE PERFORMANCE
+// Identifica os componentes mais lentos do sistema
+AppDependencies
+| where TimeGenerated > ago(1h)
+| summarize 
+    AvgDuration = round(avg(DurationMs), 2),
+    P95Duration = round(percentile(DurationMs, 95), 2),
+    CallCount = count(),
+    FailureRate = round(countif(Success == false) * 100.0 / count(), 2)
+    by Type, Target
+| where AvgDuration > 1000 // Chamadas que demoram mais de 1 segundo
+| order by P95Duration desc
+
+// 4. ANÁLISE DE CONCORRÊNCIA
+// Monitora quantas requisições simultâneas cada agente está processando
+AppRequests
+| where TimeGenerated > ago(1h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize 
+    ConcurrentRequests = count()
+    by AgentName, bin(TimeGenerated, 1m)
+| summarize 
+    AvgConcurrency = round(avg(ConcurrentRequests), 2),
+    MaxConcurrency = max(ConcurrentRequests),
+    P95Concurrency = round(percentile(ConcurrentRequests, 95), 2)
+    by AgentName
+| order by MaxConcurrency desc
+
+// 5. ANÁLISE DE EFICIÊNCIA DE CACHE
+// Monitora hit rate e performance do cache
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "cache"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    CacheOperation = tostring(Properties.cache_operation),
+    CacheHit = tobool(Properties.cache_hit)
+| summarize 
+    TotalOperations = count(),
+    CacheHits = countif(CacheHit == true),
+    HitRate = round(countif(CacheHit == true) * 100.0 / count(), 2),
+    AvgCacheLatency = round(avg(toint(Properties.cache_latency_ms)), 2)
+    by AgentId, CacheOperation
+| order by HitRate asc
+
+// 6. ANÁLISE DE THROUGHPUT POR AGENTE
+// Calcula o throughput (requisições por segundo) de cada agente
+AppRequests
+| where TimeGenerated > ago(1h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize RequestCount = count() by AgentName, bin(TimeGenerated, 1m)
+| summarize 
+    AvgThroughput = round(avg(RequestCount), 2),
+    MaxThroughput = max(RequestCount),
+    MinThroughput = min(RequestCount)
+    by AgentName
+| order by AvgThroughput desc
+
+// 7. ANÁLISE DE UTILIZAÇÃO DE RECURSOS POR CARGA
+// Correlaciona uso de recursos com carga de trabalho
+let ResourceMetrics = AppMetrics
+| where TimeGenerated > ago(2h)
+| where Name in ("CPU Usage", "Memory Usage")
+| extend AgentId = tostring(Properties.agent_id)
+| summarize AvgResourceUsage = avg(Value) by Name, AgentId, bin(TimeGenerated, 5m);
+let RequestLoad = AppRequests
+| where TimeGenerated > ago(2h)
+| where Name contains "agent"
+| extend AgentId = extract(@"agent-(\w+)", 1, Name)
+| summarize RequestCount = count() by AgentId, bin(TimeGenerated, 5m);
+ResourceMetrics
+| join kind=inner RequestLoad on AgentId, TimeGenerated
+| project TimeGenerated, AgentId, Name, AvgResourceUsage, RequestCount
+| extend ResourceEfficiency = round(RequestCount / AvgResourceUsage, 2)
+| order by ResourceEfficiency desc
+
+// 8. ANÁLISE DE PADRÕES DE FALHA RELACIONADOS À PERFORMANCE
+// Identifica se falhas estão correlacionadas com alta latência
+AppRequests
+| where TimeGenerated > ago(2h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize 
+    AvgLatencySuccess = round(avgif(DurationMs, Success == true), 2),
+    AvgLatencyFailure = round(avgif(DurationMs, Success == false), 2),
+    SuccessCount = countif(Success == true),
+    FailureCount = countif(Success == false)
+    by AgentName, bin(TimeGenerated, 10m)
+| where FailureCount > 0
+| extend LatencyDifference = AvgLatencyFailure - AvgLatencySuccess
+| where LatencyDifference > 1000 // Falhas são 1s+ mais lentas que sucessos
+| order by LatencyDifference desc
+

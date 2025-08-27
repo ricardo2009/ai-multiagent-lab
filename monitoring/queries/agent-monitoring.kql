@@ -1,0 +1,84 @@
+// ========================================
+// CONSULTAS KQL PARA MONITORAMENTO DE AGENTES
+// ========================================
+
+// 1. VISÃO GERAL DA SAÚDE DOS AGENTES
+// Mostra o status geral de todos os agentes nos últimos 30 minutos
+AppTraces
+| where TimeGenerated > ago(30m)
+| where Properties has "agent_id"
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    TotalRequests = count(),
+    ErrorCount = countif(SeverityLevel >= 3),
+    WarningCount = countif(SeverityLevel == 2),
+    SuccessRate = round((count() - countif(SeverityLevel >= 3)) * 100.0 / count(), 2)
+    by AgentId
+| order by ErrorCount desc
+
+// 2. LATÊNCIA MÉDIA POR AGENTE
+// Analisa o tempo de resposta médio de cada agente
+AppRequests
+| where TimeGenerated > ago(1h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize 
+    AvgLatency = round(avg(DurationMs), 2),
+    P95Latency = round(percentile(DurationMs, 95), 2),
+    P99Latency = round(percentile(DurationMs, 99), 2),
+    RequestCount = count()
+    by AgentName
+| order by AvgLatency desc
+
+// 3. DETECÇÃO DE ANOMALIAS DE PERFORMANCE
+// Identifica agentes com performance degradada
+AppRequests
+| where TimeGenerated > ago(2h)
+| where Name contains "agent"
+| extend AgentName = extract(@"agent-(\w+)", 1, Name)
+| summarize 
+    CurrentAvgLatency = avg(DurationMs),
+    RequestCount = count()
+    by AgentName, bin(TimeGenerated, 10m)
+| extend PreviousAvgLatency = prev(CurrentAvgLatency, 1)
+| where CurrentAvgLatency > PreviousAvgLatency * 1.5 // 50% de aumento
+| project TimeGenerated, AgentName, CurrentAvgLatency, PreviousAvgLatency, 
+          PerformanceDegradation = round((CurrentAvgLatency - PreviousAvgLatency) / PreviousAvgLatency * 100, 2)
+
+// 4. ANÁLISE DE ERROS POR TIPO
+// Categoriza e conta diferentes tipos de erros
+AppExceptions
+| where TimeGenerated > ago(1h)
+| extend AgentId = tostring(Properties.agent_id)
+| summarize 
+    ErrorCount = count(),
+    UniqueErrors = dcount(Type),
+    SampleMessage = any(Message)
+    by Type, AgentId
+| order by ErrorCount desc
+
+// 5. THROUGHPUT DE MENSAGENS ENTRE AGENTES
+// Monitora o fluxo de comunicação entre agentes
+AppTraces
+| where TimeGenerated > ago(1h)
+| where Message contains "message_sent" or Message contains "message_received"
+| extend 
+    SourceAgent = tostring(Properties.source_agent),
+    TargetAgent = tostring(Properties.target_agent),
+    MessageType = tostring(Properties.message_type)
+| summarize MessageCount = count() by SourceAgent, TargetAgent, MessageType
+| order by MessageCount desc
+
+// 6. ANÁLISE DE DEPENDÊNCIAS EXTERNAS
+// Monitora chamadas para serviços externos (Azure AI, Cosmos DB, etc.)
+AppDependencies
+| where TimeGenerated > ago(1h)
+| where Type in ("Azure Service Bus", "Azure Cosmos DB", "HTTP", "Azure AI")
+| summarize 
+    CallCount = count(),
+    AvgDuration = round(avg(DurationMs), 2),
+    SuccessRate = round(countif(Success == true) * 100.0 / count(), 2),
+    FailureCount = countif(Success == false)
+    by Type, Target
+| order by FailureCount desc, AvgDuration desc
+

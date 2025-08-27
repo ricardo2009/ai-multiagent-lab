@@ -1,0 +1,159 @@
+// ========================================
+// CONSULTAS KQL PARA MÉTRICAS DE NEGÓCIO
+// ========================================
+
+// 1. ANÁLISE DE TAREFAS COMPLETADAS POR AGENTE
+// Monitora quantas tarefas cada agente completa com sucesso
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message contains "task_completed"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TaskType = tostring(Properties.task_type),
+    TaskDuration = toint(Properties.task_duration_ms),
+    TaskComplexity = tostring(Properties.task_complexity)
+| summarize 
+    CompletedTasks = count(),
+    AvgTaskDuration = round(avg(TaskDuration), 2),
+    TasksByComplexity = make_bag(pack(TaskComplexity, count()))
+    by AgentId, TaskType
+| order by CompletedTasks desc
+
+// 2. ANÁLISE DE QUALIDADE DE RESULTADOS
+// Monitora a qualidade dos resultados gerados pelos agentes
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message contains "result_quality_score"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    QualityScore = todouble(Properties.quality_score),
+    TaskType = tostring(Properties.task_type)
+| summarize 
+    AvgQualityScore = round(avg(QualityScore), 2),
+    MinQualityScore = min(QualityScore),
+    MaxQualityScore = max(QualityScore),
+    TaskCount = count(),
+    HighQualityTasks = countif(QualityScore >= 0.8)
+    by AgentId, TaskType
+| extend HighQualityRate = round(HighQualityTasks * 100.0 / TaskCount, 2)
+| order by AvgQualityScore desc
+
+// 3. ANÁLISE DE TEMPO DE RESPOSTA AO USUÁRIO
+// Mede o tempo total desde a solicitação até a resposta final
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message in ("user_request_received", "user_response_sent")
+| extend 
+    RequestId = tostring(Properties.request_id),
+    EventType = case(Message == "user_request_received", "start", "end")
+| summarize 
+    StartTime = minif(TimeGenerated, EventType == "start"),
+    EndTime = maxif(TimeGenerated, EventType == "end")
+    by RequestId
+| where isnotnull(StartTime) and isnotnull(EndTime)
+| extend ResponseTime = datetime_diff('millisecond', EndTime, StartTime)
+| summarize 
+    AvgResponseTime = round(avg(ResponseTime), 2),
+    P95ResponseTime = round(percentile(ResponseTime, 95), 2),
+    P99ResponseTime = round(percentile(ResponseTime, 99), 2),
+    RequestCount = count()
+    by bin(StartTime, 1h)
+| order by StartTime desc
+
+// 4. ANÁLISE DE UTILIZAÇÃO DE RECURSOS DE IA
+// Monitora o uso de tokens e chamadas para serviços de IA
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Type == "Azure AI" or Target contains "openai"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TokensUsed = toint(Properties.tokens_used),
+    ModelUsed = tostring(Properties.model_used)
+| summarize 
+    TotalCalls = count(),
+    TotalTokens = sum(TokensUsed),
+    AvgTokensPerCall = round(avg(TokensUsed), 2),
+    SuccessRate = round(countif(Success == true) * 100.0 / count(), 2)
+    by AgentId, ModelUsed
+| extend EstimatedCost = round(TotalTokens * 0.002 / 1000, 4) // Estimativa baseada em $0.002/1K tokens
+| order by TotalTokens desc
+
+// 5. ANÁLISE DE SATISFAÇÃO DO USUÁRIO
+// Monitora feedback e ratings dos usuários
+AppTraces
+| where TimeGenerated > ago(7d)
+| where Message contains "user_feedback"
+| extend 
+    RequestId = tostring(Properties.request_id),
+    Rating = toint(Properties.rating),
+    FeedbackType = tostring(Properties.feedback_type),
+    AgentId = tostring(Properties.agent_id)
+| summarize 
+    AvgRating = round(avg(Rating), 2),
+    TotalFeedback = count(),
+    PositiveFeedback = countif(Rating >= 4),
+    NegativeFeedback = countif(Rating <= 2),
+    FeedbackByType = make_bag(pack(FeedbackType, count()))
+    by AgentId, bin(TimeGenerated, 1d)
+| extend SatisfactionRate = round(PositiveFeedback * 100.0 / TotalFeedback, 2)
+| order by TimeGenerated desc, AvgRating desc
+
+// 6. ANÁLISE DE EFICIÊNCIA OPERACIONAL
+// Calcula métricas de eficiência operacional
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message in ("task_started", "task_completed", "task_failed")
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TaskId = tostring(Properties.task_id),
+    EventType = Message
+| summarize 
+    Started = countif(EventType == "task_started"),
+    Completed = countif(EventType == "task_completed"),
+    Failed = countif(EventType == "task_failed")
+    by AgentId, bin(TimeGenerated, 1h)
+| extend 
+    CompletionRate = round(Completed * 100.0 / Started, 2),
+    FailureRate = round(Failed * 100.0 / Started, 2),
+    EfficiencyScore = round((Completed * 100.0) / (Started + Failed), 2)
+| order by TimeGenerated desc, EfficiencyScore desc
+
+// 7. ANÁLISE DE PADRÕES DE USO
+// Identifica padrões de uso e picos de demanda
+AppRequests
+| where TimeGenerated > ago(7d)
+| where Name contains "agent"
+| extend 
+    AgentName = extract(@"agent-(\w+)", 1, Name),
+    Hour = hourofday(TimeGenerated),
+    DayOfWeek = dayofweek(TimeGenerated)
+| summarize RequestCount = count() by AgentName, Hour, DayOfWeek
+| summarize 
+    AvgRequestsPerHour = round(avg(RequestCount), 2),
+    PeakHour = arg_max(RequestCount, Hour),
+    PeakDayOfWeek = arg_max(RequestCount, DayOfWeek)
+    by AgentName
+| order by AvgRequestsPerHour desc
+
+// 8. ANÁLISE DE ROI (RETORNO SOBRE INVESTIMENTO)
+// Calcula métricas de ROI baseadas em tarefas automatizadas
+AppTraces
+| where TimeGenerated > ago(30d)
+| where Message contains "task_completed"
+| extend 
+    AgentId = tostring(Properties.agent_id),
+    TaskType = tostring(Properties.task_type),
+    TaskValue = todouble(Properties.estimated_task_value), // Valor estimado da tarefa
+    ProcessingCost = todouble(Properties.processing_cost) // Custo de processamento
+| summarize 
+    TotalTasks = count(),
+    TotalValue = sum(TaskValue),
+    TotalCost = sum(ProcessingCost),
+    AvgValuePerTask = round(avg(TaskValue), 2),
+    AvgCostPerTask = round(avg(ProcessingCost), 2)
+    by AgentId, TaskType
+| extend 
+    ROI = round((TotalValue - TotalCost) / TotalCost * 100, 2),
+    NetValue = round(TotalValue - TotalCost, 2)
+| order by ROI desc
+
