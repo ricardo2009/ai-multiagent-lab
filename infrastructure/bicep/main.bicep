@@ -1,75 +1,105 @@
-targetScope = 'subscription'
+@description('Environment name')
+param environment string = 'dev'
 
-param location string = 'eastus'
-param resourceGroupName string = 'ai-multiagent-lab-rg'
-param tags object = {
-  environment: 'development'
-  project: 'ai-multiagent-lab'
+@description('Location for all resources')
+param location string = resourceGroup().location
+
+@description('Components to deploy')
+@allowed(['all', 'ai-foundry', 'cosmos-db', 'functions', 'aks', 'networking'])
+param deployComponents string = 'all'
+
+@description('Force recreate resources')
+param forceRecreate bool = false
+
+@description('Unique suffix for resource names')
+param uniqueSuffix string = uniqueString(resourceGroup().id)
+
+@description('Common tags for all resources')
+var commonTags = {
+  Environment: environment
+  Project: 'AI-Multiagent-Lab'
+  CreatedBy: 'Bicep'
+  DeployComponents: deployComponents
 }
 
-// Create Resource Group
-module rg 'modules/resource-group.bicep' = {
-  name: 'resource-group-deployment'
+// Networking Module
+module networking 'modules/networking.bicep' = if (deployComponents == 'all' || deployComponents == 'networking') {
+  name: 'networking-deployment-${uniqueSuffix}'
   params: {
-    name: resourceGroupName
     location: location
-    tags: tags
+    environment: environment
+    uniqueSuffix: uniqueSuffix
+    tags: commonTags
   }
 }
 
-// Provision Azure AI Foundry
-module aiFoundry 'modules/ai-foundry.bicep' = {
-  name: 'ai-foundry-deployment'
-  scope: resourceGroup(resourceGroupName)
+// Azure AI Foundry Module
+module aiFoundry 'modules/ai-foundry.bicep' = if (deployComponents == 'all' || deployComponents == 'ai-foundry') {
+  name: 'ai-foundry-deployment-${uniqueSuffix}'
   params: {
     location: location
-    tags: tags
+    environment: environment
+    uniqueSuffix: uniqueSuffix
+    tags: commonTags
   }
-  dependsOn: [rg]
+  dependsOn: [
+    networking
+  ]
 }
 
-// Provision Cosmos DB
-module cosmosDb 'modules/cosmos-db.bicep' = {
-  name: 'cosmos-db-deployment'
-  scope: resourceGroup(resourceGroupName)
+// Cosmos DB Module
+module cosmosDb 'modules/cosmos-db.bicep' = if (deployComponents == 'all' || deployComponents == 'cosmos-db') {
+  name: 'cosmos-db-deployment-${uniqueSuffix}'
   params: {
     location: location
-    tags: tags
+    environment: environment
+    uniqueSuffix: uniqueSuffix
+    tags: commonTags
   }
-  dependsOn: [rg]
+  dependsOn: [
+    networking
+  ]
 }
 
-// Provision AKS
-module aks 'modules/aks.bicep' = {
-  name: 'aks-deployment'
-  scope: resourceGroup(resourceGroupName)
+// Azure Functions Module
+module functions 'modules/functions.bicep' = if (deployComponents == 'all' || deployComponents == 'functions') {
+  name: 'functions-deployment-${uniqueSuffix}'
   params: {
     location: location
-    tags: tags
+    environment: environment
+    uniqueSuffix: uniqueSuffix
+    tags: commonTags
   }
-  dependsOn: [rg]
+  dependsOn: [
+    networking
+    cosmosDb
+  ]
 }
 
-// Provision Azure Functions
-module functions 'modules/functions.bicep' = {
-  name: 'functions-deployment'
-  scope: resourceGroup(resourceGroupName)
+// AKS Module
+module aks 'modules/aks.bicep' = if (deployComponents == 'all' || deployComponents == 'aks') {
+  name: 'aks-deployment-${uniqueSuffix}'
   params: {
     location: location
-    tags: tags
+    environment: environment
+    uniqueSuffix: uniqueSuffix
+    tags: commonTags
+    subnetId: deployComponents == 'all' || deployComponents == 'networking' ? networking.outputs.aksSubnetId : ''
   }
-  dependsOn: [rg]
+  dependsOn: [
+    networking
+  ]
 }
 
-// Configure Networking
-module networking 'modules/networking.bicep' = {
-  name: 'networking-deployment'
-  scope: resourceGroup(resourceGroupName)
-  params: {
-    location: location
-    tags: tags
-  }
-  dependsOn: [rg]
-}
+// Outputs
+output resourceGroupName string = resourceGroup().name
+output location string = location
+output environment string = environment
+output deployComponents string = deployComponents
 
+output aiFoundryWorkspaceName string = (deployComponents == 'all' || deployComponents == 'ai-foundry') ? aiFoundry.outputs.workspaceName : ''
+output cosmosDbAccountName string = (deployComponents == 'all' || deployComponents == 'cosmos-db') ? cosmosDb.outputs.accountName : ''
+output functionsAppName string = (deployComponents == 'all' || deployComponents == 'functions') ? functions.outputs.functionAppName : ''
+output aksClusterName string = (deployComponents == 'all' || deployComponents == 'aks') ? aks.outputs.clusterName : ''
+output vnetName string = (deployComponents == 'all' || deployComponents == 'networking') ? networking.outputs.vnetName : ''
 

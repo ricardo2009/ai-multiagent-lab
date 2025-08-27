@@ -1,0 +1,376 @@
+name: 🚀 Deploy Azure Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - production
+      deploy_components:
+        description: 'Components to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - ai-foundry
+        - cosmos-db
+        - functions
+        - aks
+        - networking
+      force_recreate:
+        description: 'Force recreate resources'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_RESOURCE_GROUP: "rg-ai-multiagent-lab-${{ github.event.inputs.environment }}"
+  AZURE_LOCATION: "East US"
+  DEPLOYMENT_NAME: "ai-multiagent-lab-${{ github.run_number }}"
+
+jobs:
+  validate-deployment:
+    name: ✅ Validate Deployment
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    outputs:
+      deployment-valid: ${{ steps.validation.outputs.valid }}
+      resource-group-exists: ${{ steps.rg-check.outputs.exists }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🔧 Install Bicep CLI
+      run: |
+        az bicep install
+        az bicep version
+        
+    - name: 🏗️ Ensure Resource Group
+      id: rg-check
+      run: |
+        if az group exists --name ${{ env.AZURE_RESOURCE_GROUP }}; then
+          echo "✅ Resource group ${{ env.AZURE_RESOURCE_GROUP }} exists"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "🏗️ Creating resource group ${{ env.AZURE_RESOURCE_GROUP }}..."
+          az group create \
+            --name ${{ env.AZURE_RESOURCE_GROUP }} \
+            --location "${{ env.AZURE_LOCATION }}" \
+            --tags \
+              Environment=${{ github.event.inputs.environment }} \
+              Project="AI-Multiagent-Lab" \
+              CreatedBy="GitHub-Actions" \
+              Repository="${{ github.repository }}" \
+              DeploymentId="${{ env.DEPLOYMENT_NAME }}"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: ✅ Validate Bicep Templates
+      id: validation
+      run: |
+        echo "🔍 Validating Bicep templates..."
+        
+        # Validate main template
+        validation_result=$(az deployment group validate \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --template-file infrastructure/bicep/main.bicep \
+          --parameters \
+            environment=${{ github.event.inputs.environment }} \
+            location="${{ env.AZURE_LOCATION }}" \
+            deployComponents="${{ github.event.inputs.deploy_components }}" \
+            forceRecreate=${{ github.event.inputs.force_recreate }} \
+          --output json)
+        
+        if echo "$validation_result" | jq -e '.error' > /dev/null; then
+          echo "❌ Template validation failed:"
+          echo "$validation_result" | jq '.error'
+          echo "valid=false" >> $GITHUB_OUTPUT
+          exit 1
+        else
+          echo "✅ Template validation successful"
+          echo "valid=true" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: 📊 What-If Analysis
+      run: |
+        echo "🔍 Running what-if analysis..."
+        
+        az deployment group what-if \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --template-file infrastructure/bicep/main.bicep \
+          --parameters \
+            environment=${{ github.event.inputs.environment }} \
+            location="${{ env.AZURE_LOCATION }}" \
+            deployComponents="${{ github.event.inputs.deploy_components }}" \
+            forceRecreate=${{ github.event.inputs.force_recreate }}
+
+  deploy-infrastructure:
+    name: 🚀 Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate-deployment
+    if: needs.validate-deployment.outputs.deployment-valid == 'true'
+    environment: ${{ github.event.inputs.environment }}
+    
+    outputs:
+      deployment-outputs: ${{ steps.deploy.outputs.deployment-outputs }}
+      
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🔧 Install Bicep CLI
+      run: |
+        az bicep install
+        
+    - name: 🚀 Deploy Infrastructure
+      id: deploy
+      run: |
+        echo "🚀 Starting infrastructure deployment..."
+        
+        deployment_output=$(az deployment group create \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name ${{ env.DEPLOYMENT_NAME }} \
+          --template-file infrastructure/bicep/main.bicep \
+          --parameters \
+            environment=${{ github.event.inputs.environment }} \
+            location="${{ env.AZURE_LOCATION }}" \
+            deployComponents="${{ github.event.inputs.deploy_components }}" \
+            forceRecreate=${{ github.event.inputs.force_recreate }} \
+          --output json)
+        
+        echo "✅ Deployment completed successfully"
+        
+        # Extract outputs
+        outputs=$(echo "$deployment_output" | jq -c '.properties.outputs')
+        echo "deployment-outputs=$outputs" >> $GITHUB_OUTPUT
+        
+        # Display key outputs
+        echo "📋 Deployment Outputs:"
+        echo "$deployment_output" | jq '.properties.outputs'
+        
+    - name: 🧪 Verify Deployed Resources
+      run: |
+        echo "🔍 Verifying deployed resources..."
+        
+        # List all resources in the resource group
+        echo "📋 Resources in ${{ env.AZURE_RESOURCE_GROUP }}:"
+        az resource list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --output table
+          
+        # Check specific resource types based on deployment components
+        if [[ "${{ github.event.inputs.deploy_components }}" == "all" || "${{ github.event.inputs.deploy_components }}" == "ai-foundry" ]]; then
+          echo "🧠 Checking AI/ML resources..."
+          az ml workspace list \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --output table || echo "ℹ️ No ML workspaces found"
+        fi
+        
+        if [[ "${{ github.event.inputs.deploy_components }}" == "all" || "${{ github.event.inputs.deploy_components }}" == "cosmos-db" ]]; then
+          echo "🗄️ Checking Cosmos DB resources..."
+          az cosmosdb list \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --output table || echo "ℹ️ No Cosmos DB accounts found"
+        fi
+        
+        if [[ "${{ github.event.inputs.deploy_components }}" == "all" || "${{ github.event.inputs.deploy_components }}" == "functions" ]]; then
+          echo "⚡ Checking Function Apps..."
+          az functionapp list \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --output table || echo "ℹ️ No Function Apps found"
+        fi
+        
+        if [[ "${{ github.event.inputs.deploy_components }}" == "all" || "${{ github.event.inputs.deploy_components }}" == "aks" ]]; then
+          echo "🐳 Checking AKS clusters..."
+          az aks list \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --output table || echo "ℹ️ No AKS clusters found"
+        fi
+
+  post-deployment-config:
+    name: ⚙️ Post-Deployment Configuration
+    runs-on: ubuntu-latest
+    needs: [validate-deployment, deploy-infrastructure]
+    if: success()
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: 🔧 Configure AI Foundry
+      if: github.event.inputs.deploy_components == 'all' || github.event.inputs.deploy_components == 'ai-foundry'
+      run: |
+        echo "🧠 Configuring Azure AI Foundry..."
+        
+        # Get ML workspace details
+        workspace_name=$(az ml workspace list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[0].name" \
+          --output tsv)
+        
+        if [[ -n "$workspace_name" ]]; then
+          echo "✅ Found ML workspace: $workspace_name"
+          
+          # Configure workspace settings
+          echo "⚙️ Configuring workspace settings..."
+          # Add any specific AI Foundry configurations here
+          
+        else
+          echo "⚠️ No ML workspace found for AI Foundry configuration"
+        fi
+        
+    - name: 🗄️ Configure Cosmos DB
+      if: github.event.inputs.deploy_components == 'all' || github.event.inputs.deploy_components == 'cosmos-db'
+      run: |
+        echo "🗄️ Configuring Cosmos DB..."
+        
+        # Get Cosmos DB account details
+        cosmos_account=$(az cosmosdb list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[0].name" \
+          --output tsv)
+        
+        if [[ -n "$cosmos_account" ]]; then
+          echo "✅ Found Cosmos DB account: $cosmos_account"
+          
+          # Create databases and containers
+          echo "📊 Creating databases and containers..."
+          
+          # Create agent database
+          az cosmosdb sql database create \
+            --account-name "$cosmos_account" \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name "agents" \
+            --throughput 400 || echo "ℹ️ Database may already exist"
+            
+          # Create containers
+          az cosmosdb sql container create \
+            --account-name "$cosmos_account" \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --database-name "agents" \
+            --name "tasks" \
+            --partition-key-path "/agentId" \
+            --throughput 400 || echo "ℹ️ Container may already exist"
+            
+        else
+          echo "⚠️ No Cosmos DB account found"
+        fi
+        
+    - name: 🐳 Configure AKS
+      if: github.event.inputs.deploy_components == 'all' || github.event.inputs.deploy_components == 'aks'
+      run: |
+        echo "🐳 Configuring AKS cluster..."
+        
+        # Get AKS cluster details
+        aks_cluster=$(az aks list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[0].name" \
+          --output tsv)
+        
+        if [[ -n "$aks_cluster" ]]; then
+          echo "✅ Found AKS cluster: $aks_cluster"
+          
+          # Get credentials
+          echo "🔑 Getting AKS credentials..."
+          az aks get-credentials \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name "$aks_cluster" \
+            --overwrite-existing
+            
+          # Verify cluster access
+          echo "🔍 Verifying cluster access..."
+          kubectl cluster-info
+          kubectl get nodes
+          
+        else
+          echo "⚠️ No AKS cluster found"
+        fi
+
+  generate-deployment-report:
+    name: 📊 Generate Deployment Report
+    runs-on: ubuntu-latest
+    needs: [validate-deployment, deploy-infrastructure, post-deployment-config]
+    if: always()
+    
+    steps:
+    - name: 📊 Generate Report
+      run: |
+        echo "📊 Generating deployment report..."
+        
+        # Determine overall status
+        if [[ "${{ needs.deploy-infrastructure.result }}" == "success" ]]; then
+          status="✅ SUCCESS"
+          status_emoji="🎉"
+        else
+          status="❌ FAILED"
+          status_emoji="💥"
+        fi
+        
+        cat > deployment-report.md << EOF
+        # $status_emoji Azure Infrastructure Deployment Report
+        
+        **Status**: $status
+        **Environment**: ${{ github.event.inputs.environment }}
+        **Components**: ${{ github.event.inputs.deploy_components }}
+        **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        **Deployment ID**: ${{ env.DEPLOYMENT_NAME }}
+        
+        ## 📋 Deployment Details
+        
+        - **Resource Group**: ${{ env.AZURE_RESOURCE_GROUP }}
+        - **Location**: ${{ env.AZURE_LOCATION }}
+        - **Force Recreate**: ${{ github.event.inputs.force_recreate }}
+        - **Workflow Run**: ${{ github.run_number }}
+        
+        ## 🎯 Job Results
+        
+        | Job | Status | Duration |
+        |-----|--------|----------|
+        | Validate Deployment | ${{ needs.validate-deployment.result }} | - |
+        | Deploy Infrastructure | ${{ needs.deploy-infrastructure.result }} | - |
+        | Post-Deployment Config | ${{ needs.post-deployment-config.result }} | - |
+        
+        ## 🔗 Useful Links
+        
+        - [Azure Portal - Resource Group](https://portal.azure.com/#@${{ secrets.AZURE_TENANT_ID }}/resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.AZURE_RESOURCE_GROUP }})
+        - [GitHub Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        
+        ---
+        *Generated by GitHub Actions*
+        EOF
+        
+        echo "📄 Deployment report:"
+        cat deployment-report.md
+        
+    - name: 📤 Upload Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-report-${{ github.event.inputs.environment }}-${{ github.run_number }}
+        path: deployment-report.md
+        retention-days: 90
+
