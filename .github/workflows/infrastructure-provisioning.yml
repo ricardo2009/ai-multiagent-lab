@@ -1,0 +1,380 @@
+name: Infrastructure Provisioning
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+        - development
+        - staging
+        - production
+      infrastructure_tool:
+        description: 'Infrastructure tool'
+        required: true
+        default: 'bicep'
+        type: choice
+        options:
+        - bicep
+        - terraform
+        - both
+      destroy_existing:
+        description: 'Destroy existing resources first'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Dry run (validate only)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_LOCATION: eastus
+  AZURE_RESOURCE_GROUP_PREFIX: ai-multiagent-lab-rg
+
+jobs:
+  # Job 1: Pre-deployment Validation
+  pre-deployment-validation:
+    name: Pre-deployment Validation
+    runs-on: ubuntu-latest
+    outputs:
+      resource-group-name: ${{ steps.set-vars.outputs.resource-group-name }}
+      deployment-id: ${{ steps.set-vars.outputs.deployment-id }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set deployment variables
+      id: set-vars
+      run: |
+        RESOURCE_GROUP_NAME="${{ env.AZURE_RESOURCE_GROUP_PREFIX }}-${{ github.event.inputs.environment }}"
+        DEPLOYMENT_ID="deploy-$(date +%Y%m%d-%H%M%S)-${{ github.run_number }}"
+        echo "resource-group-name=$RESOURCE_GROUP_NAME" >> $GITHUB_OUTPUT
+        echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+        echo "Resource Group: $RESOURCE_GROUP_NAME"
+        echo "Deployment ID: $DEPLOYMENT_ID"
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Check Azure subscription
+      run: |
+        az account show
+        az account list-locations --query "[?name=='${{ env.AZURE_LOCATION }}']" -o table
+
+    - name: Validate Azure permissions
+      run: |
+        echo "Checking required permissions..."
+        az role assignment list --assignee $(az account show --query user.name -o tsv) --scope /subscriptions/$(az account show --query id -o tsv)
+
+  # Job 2: Bicep Deployment Matrix
+  bicep-deployment:
+    name: Bicep Deployment
+    runs-on: ubuntu-latest
+    needs: pre-deployment-validation
+    if: github.event.inputs.infrastructure_tool == 'bicep' || github.event.inputs.infrastructure_tool == 'both'
+    strategy:
+      matrix:
+        component: [main, networking, security, monitoring]
+      fail-fast: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Azure CLI
+      uses: azure/CLI@v1
+      with:
+        azcliversion: 2.76.0
+
+    - name: Destroy existing resources
+      if: github.event.inputs.destroy_existing == 'true'
+      run: |
+        echo "Destroying existing resources in ${{ needs.pre-deployment-validation.outputs.resource-group-name }}"
+        az group delete --name ${{ needs.pre-deployment-validation.outputs.resource-group-name }} --yes --no-wait || true
+
+    - name: Validate Bicep template
+      run: |
+        echo "Validating Bicep template for ${{ matrix.component }}"
+        if [ "${{ matrix.component }}" == "main" ]; then
+          az bicep build --file infrastructure/bicep/main.bicep
+          az deployment sub validate \
+            --location ${{ env.AZURE_LOCATION }} \
+            --template-file infrastructure/bicep/main.bicep \
+            --parameters location=${{ env.AZURE_LOCATION }} \
+                        resourceGroupName=${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+                        environment=${{ github.event.inputs.environment }}
+        else
+          az bicep build --file infrastructure/bicep/modules/${{ matrix.component }}.bicep
+        fi
+
+    - name: Deploy Bicep template (Dry Run)
+      if: github.event.inputs.dry_run == 'true'
+      run: |
+        echo "Dry run deployment for ${{ matrix.component }}"
+        if [ "${{ matrix.component }}" == "main" ]; then
+          az deployment sub what-if \
+            --location ${{ env.AZURE_LOCATION }} \
+            --template-file infrastructure/bicep/main.bicep \
+            --parameters location=${{ env.AZURE_LOCATION }} \
+                        resourceGroupName=${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+                        environment=${{ github.event.inputs.environment }}
+        fi
+
+    - name: Deploy Bicep template
+      if: github.event.inputs.dry_run == 'false'
+      run: |
+        echo "Deploying ${{ matrix.component }} to ${{ github.event.inputs.environment }}"
+        if [ "${{ matrix.component }}" == "main" ]; then
+          az deployment sub create \
+            --location ${{ env.AZURE_LOCATION }} \
+            --template-file infrastructure/bicep/main.bicep \
+            --parameters location=${{ env.AZURE_LOCATION }} \
+                        resourceGroupName=${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+                        environment=${{ github.event.inputs.environment }} \
+            --name ${{ needs.pre-deployment-validation.outputs.deployment-id }}
+        fi
+
+    - name: Upload deployment artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: bicep-deployment-${{ matrix.component }}-${{ github.event.inputs.environment }}
+        path: |
+          infrastructure/bicep/*.json
+          deployment-output.json
+
+  # Job 3: Terraform Deployment Matrix
+  terraform-deployment:
+    name: Terraform Deployment
+    runs-on: ubuntu-latest
+    needs: pre-deployment-validation
+    if: github.event.inputs.infrastructure_tool == 'terraform' || github.event.inputs.infrastructure_tool == 'both'
+    strategy:
+      matrix:
+        workspace: [development, staging, production]
+        include:
+          - workspace: development
+            var_file: dev.tfvars
+          - workspace: staging
+            var_file: staging.tfvars
+          - workspace: production
+            var_file: prod.tfvars
+      fail-fast: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.13.1
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform Init
+      run: |
+        cd infrastructure/terraform
+        terraform init \
+          -backend-config="resource_group_name=${{ needs.pre-deployment-validation.outputs.resource-group-name }}" \
+          -backend-config="storage_account_name=tfstate${{ github.event.inputs.environment }}" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=terraform.tfstate"
+
+    - name: Terraform Workspace
+      run: |
+        cd infrastructure/terraform
+        terraform workspace select ${{ matrix.workspace }} || terraform workspace new ${{ matrix.workspace }}
+
+    - name: Terraform Plan
+      run: |
+        cd infrastructure/terraform
+        terraform plan \
+          -var-file="environments/${{ matrix.var_file }}" \
+          -var="resource_group_name=${{ needs.pre-deployment-validation.outputs.resource-group-name }}" \
+          -var="environment=${{ github.event.inputs.environment }}" \
+          -out=tfplan
+
+    - name: Terraform Apply (Dry Run)
+      if: github.event.inputs.dry_run == 'true'
+      run: |
+        cd infrastructure/terraform
+        terraform show tfplan
+
+    - name: Terraform Apply
+      if: github.event.inputs.dry_run == 'false'
+      run: |
+        cd infrastructure/terraform
+        terraform apply tfplan
+
+    - name: Upload Terraform artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: terraform-deployment-${{ matrix.workspace }}-${{ github.event.inputs.environment }}
+        path: |
+          infrastructure/terraform/tfplan
+          infrastructure/terraform/terraform.tfstate
+
+  # Job 4: Post-deployment Validation
+  post-deployment-validation:
+    name: Post-deployment Validation
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, bicep-deployment, terraform-deployment]
+    if: always() && github.event.inputs.dry_run == 'false'
+    strategy:
+      matrix:
+        validation-type: [connectivity, security, performance, compliance]
+      fail-fast: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install validation tools
+      run: |
+        pip install azure-cli azure-mgmt-resource azure-mgmt-containerservice azure-mgmt-cosmosdb
+        pip install requests pytest
+
+    - name: Connectivity Validation
+      if: matrix.validation-type == 'connectivity'
+      run: |
+        echo "Validating connectivity for ${{ needs.pre-deployment-validation.outputs.resource-group-name }}"
+        python scripts/validation/test-connectivity.py \
+          --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --environment ${{ github.event.inputs.environment }}
+
+    - name: Security Validation
+      if: matrix.validation-type == 'security'
+      run: |
+        echo "Validating security configuration"
+        python scripts/validation/test-security.py \
+          --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --environment ${{ github.event.inputs.environment }}
+
+    - name: Performance Validation
+      if: matrix.validation-type == 'performance'
+      run: |
+        echo "Validating performance baselines"
+        python scripts/validation/test-performance.py \
+          --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --environment ${{ github.event.inputs.environment }}
+
+    - name: Compliance Validation
+      if: matrix.validation-type == 'compliance'
+      run: |
+        echo "Validating compliance requirements"
+        python scripts/validation/test-compliance.py \
+          --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --environment ${{ github.event.inputs.environment }}
+
+    - name: Upload validation results
+      uses: actions/upload-artifact@v3
+      with:
+        name: validation-results-${{ matrix.validation-type }}-${{ github.event.inputs.environment }}
+        path: |
+          validation-results.json
+          validation-report.html
+
+  # Job 5: Resource Documentation
+  resource-documentation:
+    name: Generate Resource Documentation
+    runs-on: ubuntu-latest
+    needs: [post-deployment-validation]
+    if: always() && github.event.inputs.dry_run == 'false'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Generate resource inventory
+      run: |
+        echo "Generating resource inventory for ${{ needs.pre-deployment-validation.outputs.resource-group-name }}"
+        az resource list --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --output table > resource-inventory.txt
+        
+        az resource list --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --output json > resource-inventory.json
+
+    - name: Generate cost estimation
+      run: |
+        echo "Generating cost estimation"
+        az consumption usage list --output table > cost-estimation.txt || echo "Cost data not available"
+
+    - name: Generate architecture diagram
+      run: |
+        echo "Generating architecture diagram"
+        python scripts/documentation/generate-architecture-diagram.py \
+          --resource-group ${{ needs.pre-deployment-validation.outputs.resource-group-name }} \
+          --output architecture-diagram.png
+
+    - name: Upload documentation
+      uses: actions/upload-artifact@v3
+      with:
+        name: resource-documentation-${{ github.event.inputs.environment }}
+        path: |
+          resource-inventory.txt
+          resource-inventory.json
+          cost-estimation.txt
+          architecture-diagram.png
+
+  # Job 6: Notification and Cleanup
+  notification-cleanup:
+    name: Notification and Cleanup
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, bicep-deployment, terraform-deployment, post-deployment-validation, resource-documentation]
+    if: always()
+
+    steps:
+    - name: Generate deployment summary
+      run: |
+        echo "# Infrastructure Deployment Summary" > deployment-summary.md
+        echo "## Deployment Details" >> deployment-summary.md
+        echo "- Environment: ${{ github.event.inputs.environment }}" >> deployment-summary.md
+        echo "- Tool: ${{ github.event.inputs.infrastructure_tool }}" >> deployment-summary.md
+        echo "- Resource Group: ${{ needs.pre-deployment-validation.outputs.resource-group-name }}" >> deployment-summary.md
+        echo "- Deployment ID: ${{ needs.pre-deployment-validation.outputs.deployment-id }}" >> deployment-summary.md
+        echo "- Dry Run: ${{ github.event.inputs.dry_run }}" >> deployment-summary.md
+        echo "" >> deployment-summary.md
+        echo "## Job Results" >> deployment-summary.md
+        echo "- Pre-deployment Validation: ${{ needs.pre-deployment-validation.result }}" >> deployment-summary.md
+        echo "- Bicep Deployment: ${{ needs.bicep-deployment.result }}" >> deployment-summary.md
+        echo "- Terraform Deployment: ${{ needs.terraform-deployment.result }}" >> deployment-summary.md
+        echo "- Post-deployment Validation: ${{ needs.post-deployment-validation.result }}" >> deployment-summary.md
+        echo "- Resource Documentation: ${{ needs.resource-documentation.result }}" >> deployment-summary.md
+
+    - name: Upload deployment summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-summary-${{ github.event.inputs.environment }}
+        path: deployment-summary.md
+
